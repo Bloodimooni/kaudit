@@ -3,6 +3,7 @@ package audit
 import (
 	"bufio"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,8 +20,15 @@ func fakeSSH(t *testing.T) (argsFile string) {
 	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// and a sudo that just runs the command (drops -n)
-	os.WriteFile(filepath.Join(dir, "sudo"), []byte("#!/bin/sh\nshift\nexec \"$@\"\n"), 0o755)
+	// and a sudo: -n works unless $FAKE_SUDO_PW is set; -S wants that password
+	sudo := `#!/bin/sh
+case "$1" in
+-n) [ -z "$FAKE_SUDO_PW" ] || { echo "sudo: a password is required" >&2; exit 1; }; shift;;
+-S) shift 3; read pw; [ "$pw" = "$FAKE_SUDO_PW" ] || { echo "sudo: 1 incorrect password attempt" >&2; exit 1; };;
+esac
+exec "$@"
+`
+	os.WriteFile(filepath.Join(dir, "sudo"), []byte(sudo), 0o755)
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	return argsFile
 }
@@ -66,4 +74,55 @@ func TestFollowSSH(t *testing.T) {
 	f.WriteString(line)
 	f.Close()
 	read() // the appended line arrives live
+}
+
+func TestCheckSudoPassword(t *testing.T) {
+	argsFile := fakeSSH(t)
+	t.Setenv("FAKE_SUDO_PW", "s3cret")
+	log, _ := filepath.Abs("../../testdata/sample.jsonl")
+	spec := "ssh://m1" + log
+	ctx := context.Background()
+
+	if err := CheckSudo(ctx, spec, SourceOptions{}); !errors.Is(err, ErrSudoPassword) {
+		t.Fatalf("passwordless check: got %v, want ErrSudoPassword", err)
+	}
+	if err := CheckSudo(ctx, spec, SourceOptions{SudoPassword: "wrong"}); !errors.Is(err, ErrSudoPassword) {
+		t.Fatalf("wrong password: got %v, want ErrSudoPassword", err)
+	}
+	if err := CheckSudo(ctx, spec, SourceOptions{SudoPassword: "s3cret"}); err != nil {
+		t.Fatalf("right password: %v", err)
+	}
+	if err := CheckSudo(ctx, "ssh://m1/no/such/file", SourceOptions{SudoPassword: "s3cret"}); err == nil ||
+		!strings.Contains(err.Error(), "cannot read /no/such/file") {
+		t.Fatalf("missing file: got %v", err)
+	}
+	res, err := LoadFiles([]string{spec}, LoadOptions{Sudo: true, SudoPassword: "s3cret"})
+	if err != nil || len(res.Events) == 0 {
+		t.Fatalf("load with password: %v", err)
+	}
+	if args, _ := os.ReadFile(argsFile); strings.Contains(string(args), "s3cret") {
+		t.Fatalf("password leaked into ssh argv: %s", args)
+	}
+}
+
+func TestResolveSpec(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	os.WriteFile("audit.log", nil, 0o644)
+	const def = "/var/log/kubernetes/audit/audit.log"
+	for in, want := range map[string]string{
+		"master-1":             "ssh://master-1" + def,
+		"admin@master-1:2222":  "ssh://admin@master-1:2222" + def,
+		"ssh://master-1":       "ssh://master-1" + def,
+		"ssh://master-1/":      "ssh://master-1" + def,
+		"ssh://master-1/x.log": "ssh://master-1/x.log",
+		"audit.log":            "audit.log", // exists locally
+		"./missing.log":        "./missing.log",
+		"/var/log/a.log":       "/var/log/a.log",
+		"-":                    "-",
+	} {
+		if got := ResolveSpec(in, def); got != want {
+			t.Errorf("ResolveSpec(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

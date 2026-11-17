@@ -23,8 +23,9 @@ type LoadOptions struct {
 	// Stage keeps only events of this stage ("" keeps all). Audit backends
 	// usually log RequestReceived and ResponseComplete for the same request,
 	// so defaulting to ResponseComplete avoids double counting.
-	Stage string
-	Sudo  bool // ssh:// sources: read via `sudo -n`
+	Stage        string
+	Sudo         bool   // ssh:// sources: read via sudo
+	SudoPassword string // see SourceOptions.SudoPassword
 }
 
 // LoadFiles reads JSON-lines audit logs. "-" reads stdin. Files ending in .gz
@@ -41,7 +42,7 @@ func LoadFiles(paths []string, opt LoadOptions) (*LoadResult, error) {
 }
 
 func loadOne(path string, opt LoadOptions, res *LoadResult) error {
-	src, err := OpenSource(context.Background(), path, SourceOptions{Sudo: opt.Sudo})
+	src, err := OpenSource(context.Background(), path, SourceOptions{Sudo: opt.Sudo, SudoPassword: opt.SudoPassword})
 	if err != nil {
 		return err
 	}

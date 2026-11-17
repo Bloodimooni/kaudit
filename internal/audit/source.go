@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -16,7 +17,10 @@ import (
 type SourceOptions struct {
 	Follow  bool // keep reading as the log grows (tail -F)
 	Backlog int  // follow mode: lines of existing log to read first; <0 = whole file
-	Sudo    bool // ssh sources: run the remote command via `sudo -n`
+	Sudo    bool // ssh sources: run the remote command via sudo
+	// SudoPassword is fed to `sudo -S` on the remote side (over ssh's stdin,
+	// never in argv). Empty means passwordless sudo (`sudo -n`).
+	SudoPassword string
 }
 
 // Source is an open log stream. Close stops it (and kills any child process).
@@ -47,6 +51,34 @@ func (s *Source) Err() string {
 	return lines[len(lines)-1]
 }
 
+// DefaultRemoteLog is where the API server writes its audit log on the masters.
+const DefaultRemoteLog = "/var/log/kubernetes/audit/audit.log"
+
+// ResolveSpec expands a bare [user@]host[:port] (no "/", not an existing
+// local file) and an ssh:// URL without a path to ssh://.../remoteLog.
+// The login user is left to ssh: the local user unless ~/.ssh/config says otherwise.
+func ResolveSpec(spec, remoteLog string) string {
+	if spec == "-" {
+		return spec
+	}
+	if h, ok := strings.CutPrefix(spec, "ssh://"); ok {
+		if !strings.Contains(h, "/") {
+			return spec + remoteLog
+		}
+		if strings.HasSuffix(h, "/") && strings.Count(h, "/") == 1 {
+			return strings.TrimSuffix(spec, "/") + remoteLog
+		}
+		return spec
+	}
+	if strings.Contains(spec, "/") {
+		return spec
+	}
+	if _, err := os.Stat(spec); err == nil {
+		return spec
+	}
+	return "ssh://" + spec + remoteLog
+}
+
 // OpenSource opens "-" (stdin), a local path, or ssh://[user@]host[:port]/path.
 func OpenSource(ctx context.Context, spec string, opt SourceOptions) (*Source, error) {
 	if spec == "-" {
@@ -56,7 +88,7 @@ func OpenSource(ctx context.Context, spec string, opt SourceOptions) (*Source, e
 		return openSSH(ctx, spec, opt)
 	}
 	if opt.Follow {
-		return run(ctx, spec, "tail", tailArgs(opt, spec)...)
+		return run(ctx, spec, nil, "tail", tailArgs(opt, spec)...)
 	}
 	f, err := os.Open(spec)
 	if err != nil {
@@ -73,7 +105,7 @@ func tailArgs(opt SourceOptions, path string) []string {
 	return []string{"-n", n, "-F", path}
 }
 
-func openSSH(ctx context.Context, spec string, opt SourceOptions) (*Source, error) {
+func parseSSH(spec string) (*url.URL, error) {
 	u, err := url.Parse(spec)
 	if err != nil {
 		return nil, err
@@ -81,15 +113,20 @@ func openSSH(ctx context.Context, spec string, opt SourceOptions) (*Source, erro
 	if u.Host == "" || u.Path == "" || u.Path == "/" {
 		return nil, fmt.Errorf("want ssh://[user@]host[:port]/path/to/audit.log")
 	}
-	var remote []string
+	return u, nil
+}
+
+// sshCmd builds the ssh argv running remote (quoted) on u's host, with sudo
+// if requested, plus the stdin to feed it.
+func sshCmd(u *url.URL, opt SourceOptions, remote ...string) ([]string, io.Reader) {
+	var stdin io.Reader
 	if opt.Sudo {
-		remote = append(remote, "sudo", "-n")
-	}
-	if opt.Follow {
-		remote = append(remote, "tail")
-		remote = append(remote, tailArgs(opt, u.Path)...)
-	} else {
-		remote = append(remote, "cat", u.Path)
+		if opt.SudoPassword != "" {
+			remote = append([]string{"sudo", "-S", "-p", ""}, remote...)
+			stdin = strings.NewReader(opt.SudoPassword + "\n")
+		} else {
+			remote = append([]string{"sudo", "-n"}, remote...)
+		}
 	}
 	for i, a := range remote {
 		remote[i] = shellQuote(a)
@@ -103,17 +140,61 @@ func openSSH(ctx context.Context, spec string, opt SourceOptions) (*Source, erro
 	if u.User != nil {
 		host = u.User.Username() + "@" + host
 	}
-	args = append(args, host, "--", strings.Join(remote, " "))
-	src, err := run(ctx, spec, "ssh", args...)
+	return append(args, host, "--", strings.Join(remote, " ")), stdin
+}
+
+func openSSH(ctx context.Context, spec string, opt SourceOptions) (*Source, error) {
+	u, err := parseSSH(spec)
+	if err != nil {
+		return nil, err
+	}
+	remote := []string{"cat", u.Path}
+	if opt.Follow {
+		remote = append([]string{"tail"}, tailArgs(opt, u.Path)...)
+	}
+	args, stdin := sshCmd(u, opt, remote...)
+	src, err := run(ctx, spec, stdin, "ssh", args...)
 	if src != nil {
 		src.Name = u.Hostname()
 	}
 	return src, err
 }
 
-func run(ctx context.Context, name, cmd string, args ...string) (*Source, error) {
+// ErrSudoPassword means the remote sudo wants a password (or rejected the one given).
+var ErrSudoPassword = errors.New("sudo needs a password")
+
+// CheckSudo verifies that the remote sudo of an ssh:// source works with opt,
+// and can read the log file. Non-ssh specs are not checked.
+func CheckSudo(ctx context.Context, spec string, opt SourceOptions) error {
+	if !strings.HasPrefix(spec, "ssh://") {
+		return nil
+	}
+	u, err := parseSSH(spec)
+	if err != nil {
+		return err
+	}
+	opt.Sudo = true
+	args, stdin := sshCmd(u, opt, "test", "-r", u.Path)
+	c := exec.CommandContext(ctx, "ssh", args...)
+	c.Stdin = stdin
+	out, err := c.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(string(out))
+	if strings.Contains(msg, "password") || strings.Contains(msg, "terminal is required") {
+		return fmt.Errorf("%s: %w (%s)", u.Hostname(), ErrSudoPassword, msg)
+	}
+	if msg == "" && c.ProcessState != nil && c.ProcessState.ExitCode() == 1 {
+		msg = "cannot read " + u.Path
+	}
+	return fmt.Errorf("%s: %v: %s", u.Hostname(), err, msg)
+}
+
+func run(ctx context.Context, name string, stdin io.Reader, cmd string, args ...string) (*Source, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	c := exec.CommandContext(ctx, cmd, args...)
+	c.Stdin = stdin
 	// Own process group: terminal signals don't reach the child, and on
 	// cancel we kill the whole group, including anything the child spawned.
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

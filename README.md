@@ -19,20 +19,17 @@ kubectl logs ... | ./kaudit-tui -           # stdin
 
 ### Remote and live sources
 
-A source can be a local file, `-` for stdin, or `ssh://[user@]host[:port]/path`. Several sources are merged into one timeline. `-f` / `--follow` keeps streaming new events into the open UI (`tail -F`, so log rotation is handled):
+A source can be a local file, `-` for stdin, `ssh://[user@]host[:port]/path`, or just a host name. A bare host (`[user@]host[:port]`, no `/`, not an existing local file) or an `ssh://host` without a path reads `/var/log/kubernetes/audit/audit.log` on that host; change it with `--remote-log`. Without `user@`, ssh logs in as your local user (or the `User` from `~/.ssh/config`). Several sources are merged into one timeline. `-f` / `--follow` keeps streaming new events into the open UI (`tail -F`, so log rotation is handled):
 
 ```sh
 # live view across all three control-plane nodes
-./kaudit-tui -f --sudo \
-  ssh://admin@master-1/var/log/kubernetes/audit.log \
-  ssh://admin@master-2/var/log/kubernetes/audit.log \
-  ssh://admin@master-3/var/log/kubernetes/audit.log
+./kaudit-tui -f --sudo master-1 master-2 master-3
 
 ./kaudit-tui ssh://master-1/var/log/kubernetes/audit-2026-11-14.log.gz   # one-shot remote read
 ```
 
 - ssh runs with `BatchMode=yes`, so it never prompts for a password. Use keys or an agent. Host aliases from `~/.ssh/config` work.
-- `--sudo` runs the remote `tail`/`cat` via `sudo -n`, because audit logs are usually root-only. This needs passwordless sudo.
+- `--sudo` reads the remote log via sudo, because audit logs on the masters are usually root-only. Before the UI starts, kaudit checks sudo and read access on every host. If a host needs a password, it asks once (`sudo password for the remote hosts:`), checks it on all hosts, and passes it to `sudo -S` over the ssh connection. The password never appears in a command line. Hosts with passwordless sudo are never prompted.
 - `--backlog N` (default 10000): lines of existing log each source reads before following. `-1` reads the whole file.
 - While streaming, the header shows `● live`. If a source dies (unreachable host, permission denied), the footer shows ssh's error and the other sources keep running.
 - The histogram range grows with new events. Zooming in pins the window.

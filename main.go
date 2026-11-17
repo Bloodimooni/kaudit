@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -30,17 +31,22 @@ func main() {
 		width   = flag.Int("width", 0, "chart width for --summary (default: terminal width or 100)")
 		follow  = flag.Bool("follow", false, "stream new events live (tail -F) from every source")
 		backlog = flag.Int("backlog", 10000, "with --follow: lines of existing log to read first per source (-1 = whole file)")
-		sudo    = flag.Bool("sudo", false, "ssh:// sources: read the remote log via `sudo -n`")
+		sudo    = flag.Bool("sudo", false, "ssh:// sources: read the remote log via sudo (prompts once for the password if the hosts need one)")
+		remote  = flag.String("remote-log", audit.DefaultRemoteLog, "log path used for sources given as a bare host or ssh://host")
 	)
 	flag.BoolVar(follow, "f", false, "shorthand for --follow")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: %s [flags] SOURCE...\n\nSOURCE is a local file (.gz ok), - for stdin, or ssh://[user@]host[:port]/path\n\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(os.Stderr, "usage: %s [flags] SOURCE...\n\nSOURCE is a local file (.gz ok), - for stdin, ssh://[user@]host[:port]/path,\nor just a host ([user@]host[:port]), which reads --remote-log over ssh\n\n", filepath.Base(os.Args[0]))
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 	if flag.NArg() == 0 {
 		flag.Usage()
 		os.Exit(2)
+	}
+	specs := flag.Args()
+	for i, s := range specs {
+		specs[i] = audit.ResolveSpec(s, *remote)
 	}
 	by, err := audit.ParseGroupBy(*groupBy)
 	if err != nil {
@@ -51,24 +57,28 @@ func main() {
 		fail(err)
 	}
 
+	sudoPW := ""
+	if *sudo {
+		sudoPW = resolveSudo(specs)
+	}
 	if *follow {
 		if *summary {
 			fail(fmt.Errorf("--summary and --follow cannot be combined"))
 		}
-		runFollow(flag.Args(), by, filter, *filterS, audit.LoadOptions{Stage: *stage},
-			audit.SourceOptions{Follow: true, Backlog: *backlog, Sudo: *sudo})
+		runFollow(specs, by, filter, *filterS, audit.LoadOptions{Stage: *stage},
+			audit.SourceOptions{Follow: true, Backlog: *backlog, Sudo: *sudo, SudoPassword: sudoPW})
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "loading %s…\n", strings.Join(flag.Args(), ", "))
-	res, err := audit.LoadFiles(flag.Args(), audit.LoadOptions{Stage: *stage, Sudo: *sudo})
+	fmt.Fprintf(os.Stderr, "loading %s…\n", strings.Join(specs, ", "))
+	res, err := audit.LoadFiles(specs, audit.LoadOptions{Stage: *stage, Sudo: *sudo, SudoPassword: sudoPW})
 	if err != nil {
 		fail(err)
 	}
 	if len(res.Events) == 0 && res.Skipped > 0 {
 		// log has no events of the requested stage; fall back to everything
 		fmt.Fprintf(os.Stderr, "no %s events found, using all stages\n", *stage)
-		res, err = audit.LoadFiles(flag.Args(), audit.LoadOptions{Sudo: *sudo})
+		res, err = audit.LoadFiles(specs, audit.LoadOptions{Sudo: *sudo, SudoPassword: sudoPW})
 		if err != nil {
 			fail(err)
 		}
@@ -76,7 +86,7 @@ func main() {
 	if len(res.Events) == 0 {
 		fail(fmt.Errorf("no audit events found (%d unparsable lines)", res.BadLine))
 	}
-	header := describeInputs(flag.Args())
+	header := describeInputs(specs)
 	if res.BadLine > 0 {
 		header += fmt.Sprintf(" · %d bad lines", res.BadLine)
 	}
@@ -106,6 +116,61 @@ func describeInputs(paths []string) string {
 		return filepath.Base(paths[0])
 	}
 	return fmt.Sprintf("%d sources", len(paths))
+}
+
+// resolveSudo checks sudo on every ssh:// host before the TUI owns the
+// terminal. If any host needs a password, it asks once and verifies that
+// password on all hosts. Returns "" for passwordless sudo.
+func resolveSudo(specs []string) string {
+	ctx := context.Background()
+	check := func(pw string) (needPW bool) {
+		errs := make([]error, len(specs))
+		var wg sync.WaitGroup
+		for i, spec := range specs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				errs[i] = audit.CheckSudo(ctx, spec, audit.SourceOptions{SudoPassword: pw})
+			}()
+		}
+		wg.Wait()
+		for _, err := range errs {
+			if errors.Is(err, audit.ErrSudoPassword) {
+				needPW = true
+			} else if err != nil {
+				fail(err)
+			}
+		}
+		return needPW
+	}
+	if !check("") {
+		return ""
+	}
+	for range 3 {
+		pw, err := readPassword("sudo password for the remote hosts: ")
+		if err != nil {
+			fail(err)
+		}
+		if !check(pw) {
+			return pw
+		}
+		fmt.Fprintln(os.Stderr, "sudo rejected the password on at least one host, try again")
+	}
+	fail(fmt.Errorf("sudo: too many incorrect password attempts"))
+	return ""
+}
+
+// readPassword prompts on the terminal, also when stdin is a pipe ("-" source).
+func readPassword(prompt string) (string, error) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return "", fmt.Errorf("sudo needs a password but there is no terminal to ask: %w", err)
+	}
+	defer tty.Close()
+	fmt.Fprint(tty, prompt)
+	pw, err := term.ReadPassword(int(tty.Fd()))
+	fmt.Fprintln(tty)
+	return string(pw), err
 }
 
 // runFollow starts the TUI empty and streams events from every source into it.
