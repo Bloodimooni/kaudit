@@ -9,12 +9,15 @@ Interactive terminal explorer for Kubernetes API server audit logs (`audit.k8s.i
 ## Build / run
 
 ```sh
-go build -o kaudit-tui .
-./kaudit-tui /var/log/kubernetes/audit.log
-./kaudit-tui audit-*.log.gz                 # gzip detected automatically
-kubectl logs ... | ./kaudit-tui -           # stdin
-./kaudit-tui --filter 'code:>=400' audit.log
-./kaudit-tui --summary --top 30 audit.log   # non-interactive: histogram + top groups
+git clone git@github.com:Bloodimooni/kaudit-tui.git && cd kaudit-tui
+go build -o kaudit .
+
+./kaudit -f --sudo master-1 master-2 master-3     # live view of the masters' audit logs
+./kaudit /var/log/kubernetes/audit/audit.log      # local file
+./kaudit audit-*.log.gz                           # gzip detected automatically
+kubectl logs ... | ./kaudit -                     # stdin
+./kaudit --filter 'code:>=400' audit.log
+./kaudit --summary --top 30 audit.log             # non-interactive: histogram + top groups
 ```
 
 ### Remote and live sources
@@ -23,9 +26,9 @@ A source can be a local file, `-` for stdin, `ssh://[user@]host[:port]/path`, or
 
 ```sh
 # live view across all three control-plane nodes
-./kaudit-tui -f --sudo master-1 master-2 master-3
+./kaudit -f --sudo master-1 master-2 master-3
 
-./kaudit-tui ssh://master-1/var/log/kubernetes/audit-2026-11-14.log.gz   # one-shot remote read
+./kaudit ssh://master-1/var/log/kubernetes/audit/audit-2026-11-14.log.gz   # one-shot remote read
 ```
 
 - ssh runs with `BatchMode=yes`, so it never prompts for a password. Use keys or an agent. Host aliases from `~/.ssh/config` work.
@@ -35,11 +38,13 @@ A source can be a local file, `-` for stdin, `ssh://[user@]host[:port]/path`, or
 - The histogram range grows with new events. Zooming in pins the window.
 
 Flags:
+- `-f` / `--follow`, `--backlog N`, `--sudo`: see above
+- `--remote-log PATH`: log path for sources given as a bare host, default `/var/log/kubernetes/audit/audit.log`
 - `--group-by similar|user|resource|verb|namespace|sourceIP|userAgent|status|none`
 - `--stage`: default `ResponseComplete`. This avoids counting each request twice. Use `--stage ''` for all stages.
 - `--filter`, `--summary`, `--top`, `--width`
 
-Try it with the bundled synthetic log, which has an incident spike at 09:42: `./kaudit-tui testdata/sample.jsonl`.
+Try it with the bundled synthetic log, which has an incident spike at 09:42: `./kaudit testdata/sample.jsonl`.
 Regenerate it with `go run ./internal/gen > testdata/sample.jsonl`.
 
 ## Keys
