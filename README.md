@@ -33,12 +33,13 @@ A source can be a local file, `-` for stdin, `ssh://[user@]host[:port]/path`, or
 
 - ssh runs with `BatchMode=yes`, so it never prompts for a password. Use keys or an agent. Host aliases from `~/.ssh/config` work.
 - `--sudo` reads the remote log via sudo, because audit logs on the masters are usually root-only. Before the UI starts, kaudit checks sudo and read access on every host. If a host needs a password, it asks once (`sudo password for the remote hosts:`), checks it on all hosts, and passes it to `sudo -S` over the ssh connection. The password never appears in a command line. Hosts with passwordless sudo are never prompted.
-- `--backlog N` (default 10000): lines of existing log each source reads before following. `-1` reads the whole file.
+- **History:** for every ssh source kaudit also reads the rotated logs next to the log (`audit-2026-11-19T13-36-10.525.log`, `.gz` too, oldest first), so you can go back in time across rotations. `--history N` reads only the newest N rotated files per host, `--history 0` turns it off. Big rotated logs take a while to load and use memory: limit them when you only need the recent past.
+- `--backlog N` (default 10000): lines of existing log each source reads before following. `-1` reads the whole file. While history is on, the live log is read whole by default, so there is no gap between the rotated files and the live log. Pass `--backlog` to override.
 - While streaming, the header shows `● live`. If a source dies (unreachable host, permission denied), the footer shows ssh's error and the other sources keep running.
 - The histogram range grows with new events. Zooming in pins the window.
 
 Flags:
-- `-f` / `--follow`, `--backlog N`, `--sudo`: see above
+- `-f` / `--follow`, `--backlog N`, `--sudo`, `--history N`: see above
 - `--remote-log PATH`: log path for sources given as a bare host, default `/var/log/kubernetes/audit/audit.log`
 - `--group-by similar|user|resource|verb|namespace|sourceIP|userAgent|status|none`
 - `--stage`: default `ResponseComplete`. This avoids counting each request twice. Use `--stage ''` for all stages.
@@ -58,6 +59,7 @@ Regenerate it with `go run ./internal/gen > testdata/sample.jsonl`.
 | `s` | cycle sort. Groups: count, latest, errors. Events: time ↑, time ↓, latency, code. The active sort is the highlighted tab in the toolbar and is marked ▼/▲ in the column header |
 | `H` | histogram shows all matching events or only the selected group |
 | `t` | time mode: ←/→ move (H/L ×10), `p` jumps to the peak, `[` marks the start, `]`/enter zooms in. `0` resets |
+| `T` | **go to time**: type a date and/or time and zoom to it, also in live mode (the window stays pinned while new events stream in). `13:36` or `2026-11-19 13:36:10` shows ±15m around it, `2026-11-19` the whole day, `13:36 ±10m` / `13:36 +1h` set the span, `13:30-13:45` or `A .. B` a range, `-30m` the last 30 minutes. Times are in the log's zone (UTC). A time without a date is its latest occurrence. `0` resets |
 | `U R N V I` | **pivot**: filter to everything sharing the selected row's user / resource / namespace / verb / IP. Use it to jump from one suspicious request to all related ones |
 | space | mark an event, or a whole group. `M` clears all marks |
 | `w` | export marked events as `./kaudit-export-<ts>.jsonl`. With nothing marked, it exports the current event, group, or filtered set |

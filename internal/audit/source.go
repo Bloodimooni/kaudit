@@ -21,6 +21,10 @@ type SourceOptions struct {
 	// SudoPassword is fed to `sudo -S` on the remote side (over ssh's stdin,
 	// never in argv). Empty means passwordless sudo (`sudo -n`).
 	SudoPassword string
+	// History (ssh sources): how many rotated logs next to the log
+	// (audit-2026-11-19T13-36-10.525.log, also .gz) to read before it,
+	// newest ones first in the cut. 0 = none, <0 = all.
+	History int
 }
 
 // Source is an open log stream. Close stops it (and kills any child process).
@@ -152,6 +156,13 @@ func openSSH(ctx context.Context, spec string, opt SourceOptions) (*Source, erro
 	if opt.Follow {
 		remote = append([]string{"tail"}, tailArgs(opt, u.Path)...)
 	}
+	if opt.History != 0 {
+		n := "+1" // tail -n +1: all files
+		if opt.History > 0 {
+			n = fmt.Sprint(opt.History)
+		}
+		remote = append([]string{"sh", "-c", historyScript, "sh", u.Path, n}, remote...)
+	}
 	args, stdin := sshCmd(u, opt, remote...)
 	src, err := run(ctx, spec, stdin, "ssh", args...)
 	if src != nil {
@@ -159,6 +170,18 @@ func openSSH(ctx context.Context, spec string, opt SourceOptions) (*Source, erro
 	}
 	return src, err
 }
+
+// historyScript prints the rotated siblings of $1 ($dir/$stem-*.$ext and
+// .gz), oldest first, keeping the last $2 of them, then execs the rest of
+// argv (cat/tail of the live log). Rotated names carry a timestamp, so
+// lexical order is time order. Unreadable files are reported and skipped.
+const historyScript = `log=$1 n=$2; shift 2
+d=${log%/*} b=${log##*/}; stem=${b%.*} ext=${b##*.}
+for f in "$d/$stem"-*."$ext" "$d/$stem"-*."$ext".gz; do [ -f "$f" ] && printf '%s\n' "$f"; done |
+sort | tail -n "$n" | while IFS= read -r f; do
+  case $f in *.gz) gzip -dc -- "$f";; *) cat -- "$f";; esac
+done
+exec "$@"`
 
 // ErrSudoPassword means the remote sudo wants a password (or rejected the one given).
 var ErrSudoPassword = errors.New("sudo needs a password")

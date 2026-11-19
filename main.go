@@ -32,6 +32,7 @@ func main() {
 		follow  = flag.Bool("follow", false, "stream new events live (tail -F) from every source")
 		backlog = flag.Int("backlog", 10000, "with --follow: lines of existing log to read first per source (-1 = whole file)")
 		sudo    = flag.Bool("sudo", false, "ssh:// sources: read the remote log via sudo (prompts once for the password if the hosts need one)")
+		history = flag.Int("history", -1, "ssh sources: rotated logs per host to read too (audit-<timestamp>.log[.gz] next to the log); -1 = all, 0 = none")
 		remote  = flag.String("remote-log", audit.DefaultRemoteLog, "log path used for sources given as a bare host or ssh://host")
 	)
 	flag.BoolVar(follow, "f", false, "shorthand for --follow")
@@ -65,20 +66,24 @@ func main() {
 		if *summary {
 			fail(fmt.Errorf("--summary and --follow cannot be combined"))
 		}
+		bl := *backlog
+		if *history != 0 && !flagSet("backlog") {
+			bl = -1 // the history ends where the live log starts: read it whole, or there is a gap
+		}
 		runFollow(specs, by, filter, *filterS, audit.LoadOptions{Stage: *stage},
-			audit.SourceOptions{Follow: true, Backlog: *backlog, Sudo: *sudo, SudoPassword: sudoPW})
+			audit.SourceOptions{Follow: true, Backlog: bl, Sudo: *sudo, SudoPassword: sudoPW, History: *history})
 		return
 	}
 
 	fmt.Fprintf(os.Stderr, "loading %s…\n", strings.Join(specs, ", "))
-	res, err := audit.LoadFiles(specs, audit.LoadOptions{Stage: *stage, Sudo: *sudo, SudoPassword: sudoPW})
+	res, err := audit.LoadFiles(specs, audit.LoadOptions{Stage: *stage, Sudo: *sudo, SudoPassword: sudoPW, History: *history})
 	if err != nil {
 		fail(err)
 	}
 	if len(res.Events) == 0 && res.Skipped > 0 {
 		// log has no events of the requested stage; fall back to everything
 		fmt.Fprintf(os.Stderr, "no %s events found, using all stages\n", *stage)
-		res, err = audit.LoadFiles(specs, audit.LoadOptions{Sudo: *sudo, SudoPassword: sudoPW})
+		res, err = audit.LoadFiles(specs, audit.LoadOptions{Sudo: *sudo, SudoPassword: sudoPW, History: *history})
 		if err != nil {
 			fail(err)
 		}
@@ -106,6 +111,11 @@ func main() {
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fail(err)
 	}
+}
+
+func flagSet(name string) (set bool) {
+	flag.Visit(func(f *flag.Flag) { set = set || f.Name == name })
+	return set
 }
 
 func describeInputs(paths []string) string {

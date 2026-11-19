@@ -26,6 +26,7 @@ type LoadOptions struct {
 	Stage        string
 	Sudo         bool   // ssh:// sources: read via sudo
 	SudoPassword string // see SourceOptions.SudoPassword
+	History      int    // see SourceOptions.History
 }
 
 // LoadFiles reads JSON-lines audit logs. "-" reads stdin. Files ending in .gz
@@ -42,7 +43,7 @@ func LoadFiles(paths []string, opt LoadOptions) (*LoadResult, error) {
 }
 
 func loadOne(path string, opt LoadOptions, res *LoadResult) error {
-	src, err := OpenSource(context.Background(), path, SourceOptions{Sudo: opt.Sudo, SudoPassword: opt.SudoPassword})
+	src, err := OpenSource(context.Background(), path, SourceOptions{Sudo: opt.Sudo, SudoPassword: opt.SudoPassword, History: opt.History})
 	if err != nil {
 		return err
 	}

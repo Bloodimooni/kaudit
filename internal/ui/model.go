@@ -63,6 +63,7 @@ type Model struct {
 	input    textinput.Model
 	inputOn  bool
 	cmdOn    bool // input line is a ":" command, not a filter
+	spanOn   bool // input line is a time span to jump to (T)
 	showHelp bool
 	status   string
 	width    int
@@ -91,16 +92,27 @@ func (m *Model) addEvents(evs []audit.Event) {
 	if len(evs) == 0 {
 		return
 	}
-	sorted := true
+	batch := make([]*audit.Event, len(evs))
 	for i := range evs {
-		e := &evs[i]
-		if n := len(m.all); n > 0 && e.Time.Before(m.all[n-1].Time) {
-			sorted = false // multiple sources interleave slightly out of order
-		}
-		m.all = append(m.all, e)
+		batch[i] = &evs[i]
 	}
-	if !sorted {
-		sort.SliceStable(m.all, func(i, j int) bool { return m.all[i].Time.Before(m.all[j].Time) })
+	sort.SliceStable(batch, func(i, j int) bool { return batch[i].Time.Before(batch[j].Time) })
+	if n := len(m.all); n == 0 || !batch[0].Time.Before(m.all[n-1].Time) {
+		m.all = append(m.all, batch...)
+	} else {
+		// sources interleave (and history arrives per host): merge, O(n) instead of a full re-sort
+		merged := make([]*audit.Event, 0, len(m.all)+len(batch))
+		i, j := 0, 0
+		for i < len(m.all) && j < len(batch) {
+			if batch[j].Time.Before(m.all[i].Time) {
+				merged = append(merged, batch[j])
+				j++
+			} else {
+				merged = append(merged, m.all[i])
+				i++
+			}
+		}
+		m.all = append(append(merged, m.all[i:]...), batch[j:]...)
 	}
 	m.minT, m.maxT = m.all[0].Time, m.all[len(m.all)-1].Time
 	m.refresh()
@@ -246,6 +258,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = false
 			return m, nil
 		}
+		if msg.String() == "T" && m.view != viewDetail {
+			m.timeMode, m.hSel = false, -1
+			m.inputOn, m.cmdOn, m.spanOn = true, false, true
+			m.input.Prompt, m.input.Placeholder = "time: ", spanHelp
+			m.input.SetValue("")
+			return m, m.input.Focus()
+		}
 		if m.timeMode {
 			return m.updateTime(msg)
 		}
@@ -253,7 +272,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case ":":
-			m.inputOn, m.cmdOn = true, true
+			m.inputOn, m.cmdOn, m.spanOn = true, true, false
 			m.input.Prompt, m.input.Placeholder = ":", ""
 			m.input.SetValue("")
 			return m, m.input.Focus()
@@ -261,7 +280,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = true
 			return m, nil
 		case "/":
-			m.inputOn, m.cmdOn = true, false
+			m.inputOn, m.cmdOn, m.spanOn = true, false, false
 			m.input.Prompt, m.input.Placeholder = "/ ", filterPlaceholder
 			m.input.SetValue(m.fText)
 			m.input.CursorEnd()
@@ -316,6 +335,15 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			default:
 				m.status = "unknown command: " + c
 			}
+			return m, nil
+		}
+		if m.spanOn {
+			if err := m.jumpTo(m.input.Value()); err != nil {
+				m.status = "time: " + err.Error() + "  (" + spanHelp + ")"
+				return m, nil
+			}
+			m.inputOn = false
+			m.input.Blur()
 			return m, nil
 		}
 		f, err := audit.ParseFilter(m.input.Value())
@@ -378,6 +406,31 @@ func (m Model) updateTime(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.buildHist()
 	}
 	return m, nil
+}
+
+// jumpTo zooms to a typed time span. The window stays pinned in live mode;
+// events streaming into it still show up.
+func (m *Model) jumpTo(text string) error {
+	ref := m.maxT
+	if ref.IsZero() {
+		ref = time.Now().UTC() // audit timestamps are UTC
+	}
+	from, to, err := parseSpan(text, ref)
+	if err != nil {
+		return err
+	}
+	m.winFrom, m.winTo = from, to
+	m.refresh()
+	m.buildHist()
+	m.status = fmt.Sprintf("showing %s – %s: %s events  (0 resets)", fmtTime(from), fmtTime(to), fmtInt(len(m.filtered)))
+	switch {
+	case len(m.all) == 0:
+	case to.Before(m.minT):
+		m.status += " · before the oldest loaded event " + fmtTime(m.minT)
+	case from.After(m.maxT) && m.live == 0:
+		m.status += " · after the newest event " + fmtTime(m.maxT)
+	}
+	return nil
 }
 
 func (m *Model) moveCursor(cur, off *int, n int, key string) bool {
@@ -713,6 +766,11 @@ FILTER  (/ to edit, enter to apply, empty clears)
 TIME
   t        enter time mode: ←/→ move (H/L ×10), p jump to peak
            [ or space mark range start, ] or enter zoom into range (or the single bucket)
+  T        go to a date/time (also in live mode; the window stays pinned while new events stream in):
+             13:36  2026-11-19 13:36:10   ±15m around it     2026-11-19   that whole day
+             13:36 ±10m  13:36 +1h        13:30-13:45  2026-11-18 22:00 .. 2026-11-19 02:00
+             -30m                         the last 30 minutes of the log
+           times are in the log's zone (UTC), a time without a date is its latest occurrence
   0        reset zoom
 
 INVESTIGATE

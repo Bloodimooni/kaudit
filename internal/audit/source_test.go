@@ -2,6 +2,8 @@ package audit
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"os"
@@ -123,6 +125,49 @@ func TestResolveSpec(t *testing.T) {
 	} {
 		if got := ResolveSpec(in, def); got != want {
 			t.Errorf("ResolveSpec(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestHistorySSH(t *testing.T) {
+	fakeSSH(t)
+	dir := t.TempDir()
+	ev := func(ts string) string {
+		return `{"kind":"Event","stage":"ResponseComplete","stageTimestamp":"` + ts + `","verb":"get"}` + "\n"
+	}
+	os.WriteFile(filepath.Join(dir, "audit-2026-11-17T10-00-00.000.log"), []byte(ev("2026-11-17T09:00:00Z")), 0o644)
+	os.WriteFile(filepath.Join(dir, "audit-2026-11-18T10-00-00.000.log"), []byte(ev("2026-11-18T09:00:00Z")), 0o644)
+	var gz bytes.Buffer
+	w := gzip.NewWriter(&gz)
+	w.Write([]byte(ev("2026-11-19T09:00:00Z")))
+	w.Close()
+	os.WriteFile(filepath.Join(dir, "audit-2026-11-19T10-00-00.000.log.gz"), gz.Bytes(), 0o644)
+	os.WriteFile(filepath.Join(dir, "other-2026-11-19.log"), []byte(ev("2000-01-01T00:00:00Z")), 0o644)
+	os.WriteFile(filepath.Join(dir, "audit.log"), []byte(ev("2026-11-19T12:00:00Z")), 0o644)
+	spec := "ssh://m1" + filepath.Join(dir, "audit.log")
+
+	for hist, want := range map[int]int{0: 1, -1: 4, 2: 3} {
+		res, err := LoadFiles([]string{spec}, LoadOptions{Sudo: true, History: hist})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Events) != want {
+			t.Errorf("history %d: %d events, want %d", hist, len(res.Events), want)
+		}
+	}
+
+	// follow: history first, then the live log keeps streaming
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	src, err := OpenSource(ctx, spec, SourceOptions{Follow: true, Backlog: -1, History: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	sc := bufio.NewScanner(src)
+	for _, want := range []string{"2026-11-17", "2026-11-18", "2026-11-19T09", "2026-11-19T12"} {
+		if !sc.Scan() || !strings.Contains(sc.Text(), want) {
+			t.Fatalf("want %s, got %q (%s)", want, sc.Text(), src.Err())
 		}
 	}
 }

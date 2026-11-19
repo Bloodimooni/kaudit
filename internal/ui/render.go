@@ -117,7 +117,7 @@ func (m *Model) histView() string {
 		p := h.Peak()
 		info = sMuted.Render("requests per ") + sBold.Render(hist.FormatStep(h.Step)) +
 			sMuted.Render(fmt.Sprintf(" (%s) · peak ", label)) + sBold.Render(fmtInt(h.Counts[p])) +
-			sMuted.Render(" at "+fmtTime(h.BucketTime(p))+" · t explore time")
+			sMuted.Render(" at "+fmtTime(h.BucketTime(p))+" · t explore time · T go to time")
 	}
 	return chart + "\n" + truncate(info, m.width)
 }
@@ -603,10 +603,10 @@ func (m *Model) footer() string {
 	switch m.view {
 	case viewGroups:
 		hs = []hint{{key("enter", "open"), 1}, {key("/", "filter"), 1}, {key("b", "group"), 2}, {key("s", "sort"), 2},
-			{key("t", "time"), 2}, {key("space", "mark"), 3}, {key("w", "export"), 3}, {pivotLong, 1}, {key("?", "help"), 1}, {key(":q", "quit"), 4}}
+			{key("t", "time"), 2}, {key("T", "go to time"), 2}, {key("space", "mark"), 3}, {key("w", "export"), 3}, {pivotLong, 1}, {key("?", "help"), 1}, {key(":q", "quit"), 4}}
 	case viewEvents:
 		hs = []hint{{key("enter", "details"), 1}, {key("esc", "back"), 1}, {key("s", "sort"), 2}, {key("/", "filter"), 2},
-			{key("t", "time"), 3}, {key("space", "mark"), 3}, {key("w", "export"), 3}, {pivotLong, 1}, {key("?", "help"), 1}}
+			{key("t", "time"), 3}, {key("T", "go to time"), 3}, {key("space", "mark"), 3}, {key("w", "export"), 3}, {pivotLong, 1}, {key("?", "help"), 1}}
 	default:
 		hs = []hint{{key("↑↓ pgup/pgdn", "scroll"), 1}, {key("n/N", "next/prev"), 2}, {key("space", "mark"), 2},
 			{key("w", "export"), 2}, {key("esc", "back"), 1}, {key(":q", "quit"), 3}}
